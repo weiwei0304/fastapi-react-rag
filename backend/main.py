@@ -1,5 +1,6 @@
 import os
-from fastapi import FastAPI, HTTPException
+import shutil
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -23,27 +24,43 @@ app.add_middleware(
     allow_headers=["*"], 
 )
 
-GLOBAL_RETRIEVER = None
-@app.on_event("startup")
-def initialize_backend_rag():
-    global GLOBAL_RETRIEVER
-    pdf_file = "test.pdf"
+UPLAOD_DIR = "./uploaded_files"
+os.makedirs(UPLAOD_DIR, exist_ok=True)
 
-    if os.path.exists(pdf_file):
-        print("[系統初始化]正在預先讀取並建立 test.pdf 的向量庫...")
-        loader = PyPDFLoader(pdf_file)
-        docs = loader.load()
+
+GLOBAL_RETRIEVER = None
+
+@app.post("/api/upload", summary="上傳 PDF 文件")
+def upload_pdf(file: UploadFile = File(...)):
+    global GLOBAL_RETRIEVER
+
+    if not file.filename.endswith('.pdf'):
+        raise HTTPException(status_code=400, detail="只支援上傳 PDF 文件")
+    
+    try:
+        file_path = os.path.join(UPLAOD_DIR, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        print(f"【上傳成功】檔案已儲存至: {file_path}，開始進行向量化")
+
+        loader = PyPDFLoader(file_path)
+        docs =loader.load()
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
         splits = text_splitter.split_documents(docs)
 
         embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001", task_type="RETRIEVAL_DOCUMENT")
         vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
+
         GLOBAL_RETRIEVER = vectorstore.as_retriever(search_kwargs={"k": 3})
-        print("[系統初始化]完成 test.pdf 的向量庫建立!")
-    else:
-        print("[系統初始化]錯誤: test.pdf 檔案不存在")
-        raise FileNotFoundError(f"文件 {pdf_file} 不存在")
+
+        return {
+            "message": f"文件 {file.filename} 上傳成功，開始進行向量化",
+            "file_name": file.filename
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"處理檔案發生錯誤:{str(e)}")
 
 class QueryRequest(BaseModel):
     question: str
@@ -58,7 +75,7 @@ class QueryResponse(BaseModel):
 
 
 
-@app.post("/api/query", response_model=QueryResponse)
+@app.post("/api/query", response_model=QueryResponse, summary="針對已上傳文件進行RAG問答")
 def query_endpoint(request: QueryRequest):
     if not os.getenv("GOOGLE_API_KEY"):
         raise HTTPException(status_code=500, detail="Google API Key 未設定")
